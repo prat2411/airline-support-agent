@@ -8,7 +8,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
 
@@ -20,15 +20,15 @@ MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 MAX_HISTORY = 20
 
 INTENTS = {
-    "booking": ("book", "booking", "reserve", "reservation", "ticket"),
     "ticket_price": ("price", "cost", "fare", "how much"),
+    "booking": ("book", "booking", "reserve", "reservation"),
     "flight_status": ("status", "delayed", "delay", "on time", "cancelled"),
     "baggage_policy": ("baggage policy", "luggage allowance", "carry-on", "checked bag"),
     "cancellation": ("cancel", "cancellation"),
     "refund": ("refund", "money back", "reimburse"),
     "change_flight": ("change flight", "reschedule", "change my flight"),
     "check_in": ("check in", "check-in", "boarding pass"),
-    "lost_baggage": ("lost baggage", "missing luggage", "bag did not arrive", "bag is missing", "baggage is missing"),
+    "lost_baggage": ("lost baggage", "missing luggage", "luggage is missing", "bag did not arrive", "bag is missing", "baggage is missing"),
     "complaint": ("complaint", "complain", "unhappy", "terrible service"),
     "accessibility": ("wheelchair", "accessible", "special assistance"),
     "other": (),
@@ -99,8 +99,14 @@ def fallback_response(message: str, image_name: str | None = None) -> tuple[str,
 
 
 def _history_messages(history: list[dict[str, Any]]) -> list[HumanMessage]:
-    return [HumanMessage(content=item.get("content", "")) for item in history[-MAX_HISTORY:]
-            if item.get("role") in {"user", "human"}]
+    messages = []
+    for item in history[-MAX_HISTORY:]:
+        content = item.get("content", "")
+        if item.get("role") in {"user", "human"}:
+            messages.append(HumanMessage(content=content))
+        elif item.get("role") in {"assistant", "ai"}:
+            messages.append(AIMessage(content=content))
+    return messages
 
 
 def answer(message: str, history: list[dict[str, Any]] | None = None,
