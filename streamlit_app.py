@@ -7,6 +7,8 @@ from datetime import datetime
 import requests
 import streamlit as st
 
+from app import answer as local_answer
+
 st.set_page_config(page_title="AeroAssist | Customer Care", page_icon="✈️", layout="wide",
                    initial_sidebar_state="expanded")
 
@@ -72,6 +74,8 @@ with main:
                 st.markdown(f'<span class="intent-tag">{item["intent"].replace("_", " ")}</span>', unsafe_allow_html=True)
             for tool_name in item.get("tools_called", []):
                 st.markdown(f'<span class="tool-tag">tool · {tool_name.replace("_", " ")}</span>', unsafe_allow_html=True)
+            if item.get("fallback_notice"):
+                st.caption(item["fallback_notice"])
 
 with rail:
     st.markdown('<div class="side-section">At a glance</div>', unsafe_allow_html=True)
@@ -103,5 +107,10 @@ if prompt:
                           "tools_called": result.get("tools_called", []),
                           "time": datetime.now().strftime("%H:%M")})
     except requests.RequestException as error:
-        st.session_state.messages.append({"role": "assistant", "content": f"Backend unavailable: {error}"})
+        result = local_answer(prompt, st.session_state.messages[:-1], image)
+        st.session_state.messages.append({"role": "assistant", "content": result["answer"],
+                          "intent": result.get("intent"),
+                          "tools_called": result.get("tools_called", []),
+                          "time": datetime.now().strftime("%H:%M"),
+                          "fallback_notice": f"Live API unavailable at {api_url}; handled locally."})
     st.rerun()
