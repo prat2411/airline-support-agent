@@ -22,10 +22,10 @@ MAX_HISTORY = 20
 INTENTS = {
     "ticket_price": ("price", "cost", "fare", "how much"),
     "booking": ("book", "booking", "reserve", "reservation"),
-    "flight_status": ("status", "delayed", "delay", "on time", "cancelled"),
-    "baggage_policy": ("baggage policy", "luggage allowance", "carry-on", "checked bag"),
-    "cancellation": ("cancel", "cancellation"),
     "refund": ("refund", "money back", "reimburse"),
+    "flight_status": ("status", "delayed", "delay", "on time", "cancelled"),
+    "baggage_policy": ("baggage policy", "baggage allowance", "luggage allowance", "carry-on", "checked bag"),
+    "cancellation": ("cancel", "cancellation"),
     "change_flight": ("change flight", "reschedule", "change my flight"),
     "check_in": ("check in", "check-in", "boarding pass"),
     "lost_baggage": ("lost baggage", "missing luggage", "luggage is missing", "bag did not arrive", "bag is missing", "baggage is missing"),
@@ -66,6 +66,10 @@ _init_db()
 
 def detect_intent(message: str) -> str:
     text = message.lower()
+    route_words = {"fare", "price", "cost", "flight", "book", "booking", "fly", "ticket"}
+    route_match = re.fullmatch(r"(?:from\s+)?([a-z]+(?:\s+[a-z]+)?)\s+to\s+([a-z]+(?:\s+[a-z]+)?)", text.strip())
+    if route_match and route_match.group(1).split()[0] not in route_words:
+        return "route_search"
     for intent, keywords in INTENTS.items():
         if any(keyword in text for keyword in keywords):
             return intent
@@ -77,14 +81,91 @@ def _destination(message: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def fallback_response(message: str, image_name: str | None = None) -> tuple[str, str, list[str]]:
+def _booking_details(text: str) -> tuple[str | None, str | None, str | None]:
+    route = re.search(
+        r"(?:from\s+)?([a-z]+(?:\s+[a-z]+)??)\s+to\s+([a-z]+(?:\s+[a-z]+)??)"
+        r"(?=\s+(?:travel|on|for|date)|$)",
+        text,
+        re.I,
+    )
+    date = re.search(
+        r"\b\d{1,2}(?:st|nd|rd|th)?\s*(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|"
+        r"may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+        r"nov(?:ember)?|dec(?:ember)?)\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|"
+        r"apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|"
+        r"oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\b",
+        text,
+        re.I,
+    )
+    passengers = re.search(r"\b(\d+)\s+(?:people|passengers|persons|travellers|travelers)\b", text, re.I)
+    return (
+        f"{route.group(1).title()} to {route.group(2).title()}" if route else None,
+        date.group(0) if date else None,
+        passengers.group(1) if passengers else None,
+    )
+
+
+def _booking_follow_up(message: str, history: list[dict[str, Any]]) -> str | None:
+    previous_user_text = " ".join(
+        str(item.get("content", "")) for item in history if item.get("role") in {"user", "human"}
+    )
+    combined_text = f"{previous_user_text} {message}".strip()
+    route, date, passengers = _booking_details(combined_text)
+    has_booking_context = route or re.search(r"\b(book|booking|reserve|reservation)\b", previous_user_text, re.I)
+    has_follow_up_detail = date or passengers
+    if not has_booking_context or not has_follow_up_detail:
+        return None
+    if not route:
+        return "Please share your origin and destination."
+    if not date:
+        return f"I have the route {route}. What travel date would you prefer?"
+    if not passengers:
+        return f"I have {route} for {date}. How many passengers are travelling?"
+    return f"I have {route} for {date} and {passengers} passengers. Please confirm these details to continue."
+
+
+def _booking_confirmation(message: str, history: list[dict[str, Any]]) -> str | None:
+    if not re.search(r"\b(confirm|confirmed|yes|proceed|book it)\b", message, re.I):
+        return None
+    previous_text = " ".join(str(item.get("content", "")) for item in history)
+    if "Please confirm these details" not in previous_text:
+        return None
+    user_text = " ".join(
+        str(item.get("content", "")) for item in history if item.get("role") in {"user", "human"}
+    )
+    route, date, passengers = _booking_details(user_text)
+    if not route or not date or not passengers:
+        return "Your booking details are confirmed. Please provide any missing travel information to continue."
+    return (f"Booking details confirmed for {route}, {date}, {passengers} passengers. "
+            "Your request is ready for booking confirmation.")
+
+
+def fallback_response(message: str, history: list[dict[str, Any]] | None = None,
+                     image_name: str | None = None) -> tuple[str, str, list[str]]:
+    history = history or []
+    booking_confirmation = _booking_confirmation(message, history)
+    if booking_confirmation:
+        return booking_confirmation, "booking", []
+    booking_follow_up = _booking_follow_up(message, history)
+    if booking_follow_up:
+        return booking_follow_up, "booking", []
     intent = detect_intent(message)
+    if intent == "route_search":
+        return ("I can help you find a flight for that route. Please share your travel date "
+                "and number of passengers.", intent, [])
     if intent == "ticket_price":
         city = _destination(message)
         return (get_ticket_price.invoke({"destination_city": city}) if city else
                 "Which destination city should I price for?", intent, ["get_ticket_price"] if city else [])
     if intent in {"refund", "complaint", "lost_baggage", "accessibility"}:
         return create_support_case.invoke({"intent": intent, "summary": message}), intent, ["create_support_case"]
+    if intent == "booking":
+        route, date, passengers = _booking_details(message)
+        if route and date and passengers:
+            return (f"I have {route} for {date} and {passengers} passengers. Please confirm these details to continue.",
+                    intent, [])
+        if route:
+            return (f"I have the route {route}. Please share your travel date and number of passengers.", intent, [])
     responses = {
         "booking": "I can help arrange a booking. Please share your origin, destination, travel date, and passenger count.",
         "flight_status": "Please share your flight number and travel date so I can check its status.",
@@ -115,7 +196,7 @@ def answer(message: str, history: list[dict[str, Any]] | None = None,
     image_name = image.get("name") if image else None
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        text, intent, called_tools = fallback_response(message, image_name)
+        text, intent, called_tools = fallback_response(message, history, image_name)
         return {"answer": text, "intent": intent, "tools_called": called_tools, "fallback": True}
 
     try:
@@ -141,7 +222,7 @@ def answer(message: str, history: list[dict[str, Any]] | None = None,
         text = response.content if isinstance(response.content, str) else str(response.content)
         return {"answer": text, "intent": detect_intent(message), "tools_called": called_tools, "fallback": False}
     except Exception:
-        text, intent, called_tools = fallback_response(message, image_name)
+        text, intent, called_tools = fallback_response(message, history, image_name)
         return {"answer": text, "intent": intent, "tools_called": called_tools, "fallback": True}
 
 
